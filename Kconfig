@@ -6,7 +6,7 @@ menu "MadPilot WIFI"
   config MADPILOT_NTP_SERVER
     string "NTP Server"
 		default "pool.ntp.org"
-		depends MADPILOT_USE_NTP
+		depends on  MADPILOT_USE_NTP
     help
       URL of the NTP server to talk to
 
