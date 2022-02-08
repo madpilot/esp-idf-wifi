@@ -1,0 +1,13 @@
+menu "MadPilot WIFI"
+	config MADPILOT_USE_NTP
+		bool "Update the time using NTP on connection"
+
+
+  config MADPILOT_NTP_SERVER
+    string "NTP Server"
+		default "pool.ntp.org"
+		depends MADPILOT_USE_NTP
+    help
+      URL of the NTP server to talk to
+
+endmenu
