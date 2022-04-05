@@ -34,6 +34,8 @@ static const char *TAG = "wifi";
 
 static int s_retry_num = 0;
 
+static wifi_callbacks_t *s_wifi_callbacks = NULL;
+
 #ifdef CONFIG_IDF_TARGET_ESP8266
 static esp_err_t event_handler(void *ctx, system_event_t *event)
 {
@@ -121,6 +123,12 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
 }
 #endif
 
+void wifi_init(wifi_callbacks_t *callbacks)
+{
+  ESP_LOGI(TAG, "Initializing callbacks");
+  s_wifi_callbacks = callbacks;
+}
+
 void wifi_init_sta(const char *ssid, const char *password)
 {
   ESP_LOGI(TAG, "Starting WIFI initialisation.");
@@ -168,6 +176,10 @@ void wifi_init_sta(const char *ssid, const char *password)
   if (bits & WIFI_CONNECTED_BIT)
   {
     ESP_LOGI(TAG, "Connected to AP SSID: %s", ssid);
+    if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_connect != NULL)
+    {
+      s_wifi_callbacks->on_connect();
+    }
   }
   else if (bits & WIFI_FAIL_BIT)
   {
