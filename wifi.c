@@ -1,7 +1,6 @@
 #include "wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
 #include "freertos/queue.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
@@ -21,20 +20,75 @@
 
 #define WIFI_MAXIMUM_RETRY 5
 
-/* FreeRTOS event group to signal when we are connected*/
-static EventGroupHandle_t s_wifi_event_group;
-
-/* The event group allows multiple bits for each event, but we only care about two events:
- * - we are connected to the AP with an IP
- * - we failed to connect after the maximum amount of retries */
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT BIT1
-
 static const char *TAG = "wifi";
-
-static int s_retry_num = 0;
-
+static wifi_manager_t s_wifi_manager;
 static wifi_callbacks_t *s_wifi_callbacks = NULL;
+
+void wifi_handle_connecting();
+void wifi_handle_disconnect(wifi_event_sta_disconnected_t *event_data);
+void wifi_handle_connect(ip_event_got_ip_t *event_data);
+void wifi_handler_reconnect(wifi_event_sta_disconnected_t *event_data);
+void wifi_handle_connect_fail(wifi_event_sta_disconnected_t *event_data);
+
+void wifi_handle_connecting()
+{
+  ESP_LOGI(TAG, "Connecting to WIFI");
+  s_wifi_manager.retries = 0;
+  s_wifi_manager.state = WIFI_STATE_CONNECTING;
+  if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
+  {
+    s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_CONNECTING, NULL);
+  }
+  esp_wifi_connect();
+}
+
+void wifi_handle_disconnect(wifi_event_sta_disconnected_t *event_data)
+{
+
+  s_wifi_manager.state = WIFI_STATE_DISCONNECTED;
+  s_wifi_manager.retries = 0;
+
+  ESP_LOGI(TAG, "WIFI disconnected (Reason: %i)", event_data->reason);
+  wifi_disconnect();
+
+  if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
+  {
+    s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_DISCONNECTED, event_data);
+  }
+}
+
+void wifi_handle_connect(ip_event_got_ip_t *event_data)
+{
+  // ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+  s_wifi_manager.state = WIFI_STATE_CONNECTED;
+  // memcpy(&s_wifi_manager.ip, &event->ip_info.ip, sizeof(esp_ip_addr_t));
+  if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
+  {
+    s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_CONNECTED, event_data);
+  }
+  s_wifi_manager.retries = 0;
+}
+
+void wifi_handler_reconnect(wifi_event_sta_disconnected_t *event_data)
+{
+  ESP_LOGI(TAG, "Connection to WIFI failed. Trying %i more times. (Reason: %i)", WIFI_MAXIMUM_RETRY - s_wifi_manager.retries, event_data->reason);
+  s_wifi_manager.retries += 1;
+  if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
+  {
+    s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_RETRYING, event_data);
+  }
+  esp_wifi_connect();
+}
+
+void wifi_handle_connect_fail(wifi_event_sta_disconnected_t *event_data)
+{
+  wifi_disconnect();
+  if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
+  {
+    s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_CONNECT_FAIL, event_data);
+  }
+  ESP_LOGI(TAG, "Connection to WIFI failed %i times. Giving up. (Reason: %i)", WIFI_MAXIMUM_RETRY, event_data->reason);
+}
 
 #ifdef CONFIG_IDF_TARGET_ESP8266
 static esp_err_t event_handler(void *ctx, system_event_t *event)
@@ -43,27 +97,26 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
 
   if (event_id == SYSTEM_EVENT_STA_START)
   {
-    esp_wifi_connect();
+    wifi_handle_connecting()
   }
   else if (event_id == SYSTEM_EVENT_STA_DISCONNECTED)
   {
-    if (s_retry_num < WIFI_MAXIMUM_RETRY)
+    if (s_wifi_manager.state != WIFI_STATE_CONNECTED && s_wifi_manager.desired_state == WIFI_STATE_CONNECTED && s_wifi_manager.retries < WIFI_MAXIMUM_RETRY)
     {
-      esp_wifi_connect();
-      s_retry_num++;
-      ESP_LOGI(TAG, "Connection to AP failed. Retrying.");
+      wifi_handler_reconnect(event_data);
+    }
+    else if (s_wifi_manager.desired_state == WIFI_STATE_CONNECTED && s_wifi_manager.retries >= WIFI_MAXIMUM_RETRY)
+    {
+      wifi_handle_connect_fail(event_data);
     }
     else
     {
-      xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+      wifi_handle_disconnect((wifi_event_sta_disconnected_t *)event->event_data)
     }
-    ESP_LOGI(TAG, "Unable to connect to the AP");
   }
   else if (event_id == SYSTEM_EVENT_STA_GOT_IP)
   {
-    ESP_LOGI(TAG, "Received IP Address: %s", ip4addr_ntoa(&event->event_info.got_ip.ip_info.ip));
-    s_retry_num = 0;
-    xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    wifi_handle_connect((ip_event_got_ip_t *)event->event_data)
   }
   return ESP_OK;
 }
@@ -72,53 +125,15 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
 {
   if (event_id == WIFI_EVENT_STA_START)
   {
-    esp_wifi_connect();
+    wifi_handle_connecting();
   }
   else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
   {
-    if (s_retry_num < WIFI_MAXIMUM_RETRY)
-    {
-      esp_wifi_connect();
-      s_retry_num++;
-      ESP_LOGI(TAG, "Connection to AP failed. Retrying.");
-    }
-    else
-    {
-      xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-    }
-    ESP_LOGI(TAG, "Unable to connect to the AP");
+    wifi_handle_disconnect((wifi_event_sta_disconnected_t *)event_data);
   }
   else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
   {
-    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-    ESP_LOGI(TAG, "Received IP Address: " IPSTR, IP2STR(&event->ip_info.ip));
-    s_retry_num = 0;
-    xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-
-#ifdef CONFIG_MADPILOT_USE_NTP
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    sntp_setservername(0, CONFIG_MADPILOT_NTP_SERVER);
-    sntp_init();
-    // wait for time to be set
-    time_t now = 0;
-    struct tm timeinfo = {0};
-    int retry = 0;
-    const int retry_count = 15;
-    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count)
-    {
-      ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
-      vTaskDelay(2000 / portTICK_PERIOD_MS);
-    }
-
-    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_IN_PROGRESS)
-    {
-      ESP_LOGI(TAG, "In progress");
-      vTaskDelay(2000 / portTICK_PERIOD_MS);
-    }
-
-    time(&now);
-    localtime_r(&now, &timeinfo);
-#endif
+    wifi_handle_connect((ip_event_got_ip_t *)event_data);
   }
 }
 #endif
@@ -127,12 +142,9 @@ void wifi_init(wifi_callbacks_t *callbacks)
 {
   ESP_LOGI(TAG, "Initializing callbacks");
   s_wifi_callbacks = callbacks;
-}
-
-void wifi_init_sta(const char *ssid, const char *password)
-{
-  ESP_LOGI(TAG, "Starting WIFI initialisation.");
-  s_wifi_event_group = xEventGroupCreate();
+  s_wifi_manager.state = WIFI_STATE_DISCONNECTED;
+  s_wifi_manager.desired_state = WIFI_STATE_DISCONNECTED;
+  s_wifi_manager.retries = 0;
 
 #ifdef CONFIG_IDF_TARGET_ESP8266
   tcpip_adapter_init();
@@ -153,46 +165,62 @@ void wifi_init_sta(const char *ssid, const char *password)
   ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
   ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
 #endif
+}
+
+void wifi_connect_ssid(const char *ssid, const char *password)
+{
+  ESP_LOGI(TAG, "Connecting WIFI to SSID %s", ssid);
+  if (s_wifi_manager.state == WIFI_STATE_CONNECTED)
+  {
+    wifi_disconnect();
+  }
+
+  s_wifi_manager.desired_state = WIFI_STATE_CONNECTED;
 
   wifi_config_t wifi_config = {};
   strncpy((char *)&(wifi_config.sta.ssid), ssid, 32);
   strncpy((char *)&(wifi_config.sta.password), password, 64);
+
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
   ESP_ERROR_CHECK(esp_wifi_start());
 
   ESP_LOGI(TAG, "WIFI initialisation complete.");
+}
 
-  /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
-   * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
-  EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                         pdFALSE,
-                                         pdFALSE,
-                                         portMAX_DELAY);
+void wifi_disconnect()
+{
 
-  /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
-   * happened. */
-  if (bits & WIFI_CONNECTED_BIT)
+  s_wifi_manager.desired_state = WIFI_STATE_DISCONNECTED;
+  esp_err_t result = esp_wifi_disconnect();
+  switch (result)
   {
-    ESP_LOGI(TAG, "Connected to AP SSID: %s", ssid);
-    if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_connect != NULL)
+  case ESP_OK:
+    s_wifi_manager.state = WIFI_STATE_DISCONNECTED;
+    s_wifi_manager.retries = 0;
+    // s_wifi_manager.addr = IPADDR_NONE;
+    ESP_LOGI(TAG, "WIFI Disconnected");
+    break;
+  default:
+    if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
     {
-      s_wifi_callbacks->on_connect();
+      s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_DISCONNECT_FAIL, NULL);
     }
-  }
-  else if (bits & WIFI_FAIL_BIT)
-  {
-    ESP_LOGI(TAG, "Failed to connect to SSID: %s", ssid);
-  }
-  else
-  {
-    ESP_LOGE(TAG, "UNEXPECTED EVENT");
+    ESP_LOGE(TAG, "WIFI Disconnect failed: %i", result);
   }
 
+  ESP_ERROR_CHECK(esp_wifi_stop());
+}
+
+void wifi_uninit()
+{
 #ifndef CONFIG_IDF_TARGET_ESP8266
   ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler));
   ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler));
 #endif
-  vEventGroupDelete(s_wifi_event_group);
+}
+
+wifi_manager_state_t wifi_get_state()
+{
+  return s_wifi_manager.state;
 }
