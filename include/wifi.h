@@ -7,7 +7,9 @@ typedef enum _wifi_manager_state
 {
   WIFI_STATE_DISCONNECTED,
   WIFI_STATE_CONNECTING,
-  WIFI_STATE_CONNECTED
+  WIFI_STATE_CONNECTED,
+  WIFI_STATE_AP_STARTING,
+  WIFI_STATE_AP_STARTED
 } wifi_manager_state_t;
 
 typedef enum _wifi_events
@@ -17,7 +19,12 @@ typedef enum _wifi_events
   WIFI_CONNECTED,
   WIFI_CONNECT_FAIL,
   WIFI_DISCONNECTED,
-  WIFI_DISCONNECT_FAIL
+  WIFI_DISCONNECT_FAIL,
+
+  WIFI_AP_STARTED,
+  WIFI_AP_STOPPED,
+  WIFI_AP_CONNECTED,
+  WIFI_AP_DISCONNECTED,
 } wifi_events_t;
 
 typedef struct _wifi_manager
@@ -37,6 +44,8 @@ typedef struct _wifi_callbacks_t
 void wifi_init(wifi_callbacks_t *callbacks);
 void wifi_connect_ssid(const char *ssid, const char *password);
 void wifi_disconnect();
+void wifi_start_soft_ap(const char *ssid, const char *password);
+void wifi_stop_soft_ap();
 void wifi_uninit();
 
 wifi_manager_state_t wifi_get_state();

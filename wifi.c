@@ -90,6 +90,40 @@ void wifi_handle_connect_fail(wifi_event_sta_disconnected_t *event_data)
   ESP_LOGI(TAG, "Connection to WIFI failed %i times. Giving up. (Reason: %i)", WIFI_MAXIMUM_RETRY, event_data->reason);
 }
 
+void wifi_handle_ap_start()
+{
+  s_wifi_manager.state = WIFI_STATE_AP_STARTED;
+  if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
+  {
+    s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_AP_STARTED, NULL);
+  }
+}
+
+void wifi_handle_ap_stop()
+{
+  s_wifi_manager.state = WIFI_STATE_DISCONNECTED;
+  if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
+  {
+    s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_AP_STOPPED, NULL);
+  }
+}
+
+void wifi_handle_ap_connected(wifi_event_ap_staconnected_t *event_data)
+{
+  if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
+  {
+    s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_AP_CONNECTED, NULL);
+  }
+}
+
+void wifi_handle_ap_disconnected(wifi_event_ap_stadisconnected_t *event_data)
+{
+  if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
+  {
+    s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_AP_DISCONNECTED, NULL);
+  }
+}
+
 #ifdef CONFIG_IDF_TARGET_ESP8266
 static esp_err_t event_handler(void *ctx, system_event_t *event)
 {
@@ -123,13 +157,29 @@ static esp_err_t event_handler(void *ctx, system_event_t *event)
 #else
 static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
-  if (event_id == WIFI_EVENT_STA_START)
+  if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
   {
     wifi_handle_connecting();
   }
   else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
   {
     wifi_handle_disconnect((wifi_event_sta_disconnected_t *)event_data);
+  }
+  else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_START)
+  {
+    wifi_handle_ap_start();
+  }
+  else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STOP)
+  {
+    wifi_handle_ap_stop();
+  }
+  else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED)
+  {
+    wifi_handle_ap_connected((wifi_event_ap_staconnected_t *)event_data);
+  }
+  else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED)
+  {
+    wifi_handle_ap_disconnected((wifi_event_ap_stadisconnected_t *)event_data);
   }
   else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
   {
@@ -154,10 +204,6 @@ void wifi_init(wifi_callbacks_t *callbacks)
   ESP_ERROR_CHECK(esp_event_loop_create_default());
 #endif
 
-#ifndef CONFIG_IDF_TARGET_ESP8266
-  esp_netif_create_default_wifi_sta();
-#endif
-
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
@@ -170,7 +216,7 @@ void wifi_init(wifi_callbacks_t *callbacks)
 void wifi_connect_ssid(const char *ssid, const char *password)
 {
   ESP_LOGI(TAG, "Connecting WIFI to SSID %s", ssid);
-  if (s_wifi_manager.state == WIFI_STATE_CONNECTED)
+  if (s_wifi_manager.state == WIFI_STATE_CONNECTED || s_wifi_manager.state == WIFI_STATE_AP_STARTED)
   {
     wifi_disconnect();
   }
@@ -183,9 +229,68 @@ void wifi_connect_ssid(const char *ssid, const char *password)
 
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+#ifndef CONFIG_IDF_TARGET_ESP8266
+  esp_netif_create_default_wifi_sta();
+#endif
   ESP_ERROR_CHECK(esp_wifi_start());
 
   ESP_LOGI(TAG, "WIFI initialisation complete.");
+}
+
+void wifi_start_soft_ap(const char *ssid, const char *password)
+{
+  ESP_LOGI(TAG, "Creating a software access point with SSID %s", ssid);
+  if (s_wifi_manager.state == WIFI_STATE_CONNECTED || s_wifi_manager.state == WIFI_STATE_AP_STARTED)
+  {
+    wifi_disconnect();
+  }
+
+  s_wifi_manager.desired_state = WIFI_STATE_AP_STARTED;
+
+  wifi_config_t wifi_config = {};
+  strncpy((char *)&(wifi_config.ap.ssid), ssid, 32);
+  strncpy((char *)&(wifi_config.ap.password), password, 64);
+
+  if (strlen(password) == 0)
+  {
+    wifi_config.ap.authmode = WIFI_AUTH_OPEN;
+  }
+  else
+  {
+    wifi_config.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+  }
+
+  wifi_config.ap.max_connection = 4; // TODO: Make config.
+
+  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+  ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &wifi_config));
+#ifndef CONFIG_IDF_TARGET_ESP8266
+  esp_netif_create_default_wifi_ap();
+#endif
+  ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+void wifi_stop_soft_ap()
+{
+  s_wifi_manager.desired_state = WIFI_STATE_DISCONNECTED;
+  esp_err_t result = esp_wifi_disconnect();
+  switch (result)
+  {
+  case ESP_OK:
+    s_wifi_manager.state = WIFI_STATE_DISCONNECTED;
+    s_wifi_manager.retries = 0;
+    // s_wifi_manager.addr = IPADDR_NONE;
+    ESP_LOGI(TAG, "Software AP stopped");
+    break;
+  default:
+    if (s_wifi_callbacks != NULL && s_wifi_callbacks->on_event != NULL)
+    {
+      s_wifi_callbacks->on_event(&s_wifi_manager, WIFI_AP_STOPPED, NULL);
+    }
+    ESP_LOGE(TAG, "Unable to stop software AP: %i", result);
+  }
+
+  ESP_ERROR_CHECK(esp_wifi_stop());
 }
 
 void wifi_disconnect()
